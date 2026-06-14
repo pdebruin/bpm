@@ -19,5 +19,6 @@ public interface IActivity
     Task<ActionOutcome> ExecuteAsync(
         Dictionary<string, string> config,
         TransitionContext context,
+        StepContext stepContext,
         CancellationToken ct = default);
 }

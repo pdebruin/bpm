@@ -10,17 +10,15 @@ public class TransitionActionDispatcherTests
 {
     private readonly InMemoryActionStore _store = new();
     private readonly InMemoryActionLog _log = new();
-    private readonly InMemoryRecordProvider _records = new();
     private readonly TransitionActionDispatcher _dispatcher;
+    private readonly FakeActivity _sendNotification = new("SendNotification");
+    private readonly FakeActivity _createRecord = new("CreateRecord");
+    private readonly FakeActivity _updateField = new("UpdateField");
+    private readonly FakeActivity _linkRecord = new("LinkRecord");
 
     public TransitionActionDispatcherTests()
     {
-        var activities = new IActivity[]
-        {
-            new SendNotificationActivity(NullLogger<SendNotificationActivity>.Instance),
-            new CreateRecordActivity(_records, NullLogger<CreateRecordActivity>.Instance),
-            new UpdateFieldActivity(_records, NullLogger<UpdateFieldActivity>.Instance),
-        };
+        IActivity[] activities = [_sendNotification, _createRecord, _updateField, _linkRecord];
 
         _dispatcher = new TransitionActionDispatcher(
             _store, _log, activities,
@@ -57,6 +55,7 @@ public class TransitionActionDispatcherTests
         Assert.Single(results);
         Assert.True(results[0].Success);
         Assert.Single(_log.Entries);
+        Assert.Single(_sendNotification.Calls);
     }
 
     [Fact]
@@ -89,7 +88,7 @@ public class TransitionActionDispatcherTests
             Name = "Any to Closed",
             EntityName = "Case",
             FieldName = "Status",
-            FromValue = null, // any
+            FromValue = null,
             ToValue = "Closed",
             Steps = new()
             {
@@ -102,78 +101,6 @@ public class TransitionActionDispatcherTests
 
         Assert.Single(results);
         Assert.True(results[0].Success);
-    }
-
-    [Fact]
-    public async Task CreateRecordActivity_CreatesRecord()
-    {
-        _store.Add(new TransitionActionDefinition
-        {
-            Name = "Create follow-up",
-            EntityName = "Case",
-            FieldName = "Status",
-            ToValue = "Triaged",
-            Steps = new()
-            {
-                new ActionStep
-                {
-                    ActivityType = "CreateRecord",
-                    Config = new()
-                    {
-                        ["entity"] = "Activity",
-                        ["field.Subject"] = "Follow up on {{RecordId}}",
-                        ["field.Type"] = "Task",
-                        ["field.Status"] = "Open"
-                    }
-                }
-            }
-        });
-
-        var recordId = Guid.NewGuid();
-        var context = MakeContext("Case", "Status", "New", "Triaged", recordId);
-        var results = await _dispatcher.DispatchAsync(context);
-
-        Assert.Single(results);
-        Assert.True(results[0].Success);
-        Assert.Single(_records.CreatedRecords);
-        Assert.Equal("Activity", _records.CreatedRecords[0].Entity);
-        Assert.Equal($"Follow up on {recordId}", _records.CreatedRecords[0].Fields["Subject"]);
-    }
-
-    [Fact]
-    public async Task UpdateFieldActivity_UpdatesField()
-    {
-        var recordId = Guid.NewGuid();
-        _store.Add(new TransitionActionDefinition
-        {
-            Name = "Set priority on escalation",
-            EntityName = "Case",
-            FieldName = "Status",
-            ToValue = "In Progress",
-            Steps = new()
-            {
-                new ActionStep
-                {
-                    ActivityType = "UpdateField",
-                    Config = new()
-                    {
-                        ["entity"] = "Case",
-                        ["recordId"] = recordId.ToString(),
-                        ["field"] = "Priority",
-                        ["value"] = "High"
-                    }
-                }
-            }
-        });
-
-        var context = MakeContext("Case", "Status", "Triaged", "In Progress", recordId);
-        var results = await _dispatcher.DispatchAsync(context);
-
-        Assert.Single(results);
-        Assert.True(results[0].Success);
-        Assert.Single(_records.UpdatedFields);
-        Assert.Equal("Priority", _records.UpdatedFields[0].Field);
-        Assert.Equal("High", _records.UpdatedFields[0].Value);
     }
 
     [Fact]
@@ -231,8 +158,8 @@ public class TransitionActionDispatcherTests
             ToValue = "Resolved",
             Steps = new()
             {
-                new ActionStep { ActivityType = "SendNotification", Config = new() { ["to"] = "customer" } },
-                new ActionStep { ActivityType = "SendNotification", Config = new() { ["to"] = "manager" } },
+                new ActionStep { ActivityType = "CreateRecord", Config = new() { ["entity"] = "Activity" } },
+                new ActionStep { ActivityType = "LinkRecord", Config = new() { ["relationship"] = "CaseActivities" } },
             }
         });
 
@@ -242,6 +169,8 @@ public class TransitionActionDispatcherTests
         Assert.Single(results);
         Assert.Equal(2, results[0].StepResults.Count);
         Assert.All(results[0].StepResults, r => Assert.Equal(ActionOutcome.Success, r.Outcome));
+        Assert.Single(_createRecord.Calls);
+        Assert.Single(_linkRecord.Calls);
     }
 
     [Fact]
@@ -272,9 +201,37 @@ public class TransitionActionDispatcherTests
         var context = MakeContext("Case", "Status", "New", "Triaged");
         var results = await _dispatcher.DispatchAsync(context);
 
-        // Only the first (blocking, failed) definition runs
         Assert.Single(results);
         Assert.False(results[0].Success);
+    }
+
+    [Fact]
+    public async Task StepContext_FlowsBetweenSteps()
+    {
+        // Use a custom activity that writes to StepContext
+        var writerActivity = new StepContextWriterActivity("Writer");
+        var readerActivity = new StepContextReaderActivity("Reader");
+
+        var dispatcher = new TransitionActionDispatcher(
+            _store, _log, new IActivity[] { writerActivity, readerActivity },
+            NullLogger<TransitionActionDispatcher>.Instance);
+
+        _store.Add(new TransitionActionDefinition
+        {
+            Name = "Context test",
+            EntityName = "Case",
+            FieldName = "Status",
+            Steps = new()
+            {
+                new ActionStep { ActivityType = "Writer", Config = new() },
+                new ActionStep { ActivityType = "Reader", Config = new() },
+            }
+        });
+
+        var context = MakeContext("Case", "Status", "New", "Triaged");
+        await dispatcher.DispatchAsync(context);
+
+        Assert.Equal("written-value", readerActivity.ReadValue);
     }
 
     private static TransitionContext MakeContext(
@@ -289,5 +246,33 @@ public class TransitionActionDispatcherTests
             NewValue = to,
             UserId = "test-user"
         };
+    }
+}
+
+// Helper activities for StepContext test
+file class StepContextWriterActivity : IActivity
+{
+    public string TypeName { get; }
+    public StepContextWriterActivity(string name) => TypeName = name;
+
+    public Task<ActionOutcome> ExecuteAsync(
+        Dictionary<string, string> config, TransitionContext context, StepContext stepContext, CancellationToken ct)
+    {
+        stepContext.Set("TestKey", "written-value");
+        return Task.FromResult(ActionOutcome.Success);
+    }
+}
+
+file class StepContextReaderActivity : IActivity
+{
+    public string TypeName { get; }
+    public string? ReadValue { get; private set; }
+    public StepContextReaderActivity(string name) => TypeName = name;
+
+    public Task<ActionOutcome> ExecuteAsync(
+        Dictionary<string, string> config, TransitionContext context, StepContext stepContext, CancellationToken ct)
+    {
+        ReadValue = stepContext.Get("TestKey");
+        return Task.FromResult(ActionOutcome.Success);
     }
 }

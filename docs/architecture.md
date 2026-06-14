@@ -3,7 +3,8 @@
 ## Overview
 
 Stage 1 provides transition actions: side effects that fire when a field value
-changes on a record. No Dapr dependency — this stage is pure .NET.
+changes on a record. BPM depends on XRM — process definitions are stored as
+XRM entity records, editable at runtime via the standard XRM UI and API.
 
 ## Components
 
@@ -16,14 +17,16 @@ changes on a record. No Dapr dependency — this stage is pure .NET.
 │       ▼                                                     │
 │  TransitionActionDispatcher (BPM)                           │
 │       │                                                     │
-│       ├── ITransitionActionStore → metadata definitions     │
+│       ├── XrmTransitionActionStore                          │
+│       │     └── reads "ProcessDefinition" XRM records       │
 │       │                                                     │
 │       ├── IActivity[] → coded activity implementations      │
 │       │     ├── SendNotificationActivity                    │
-│       │     ├── CreateRecordActivity                        │
-│       │     └── UpdateFieldActivity                         │
+│       │     ├── CreateRecordActivity (outputs to StepContext)│
+│       │     ├── UpdateFieldActivity                         │
+│       │     └── LinkRecordActivity                          │
 │       │                                                     │
-│       ├── IRecordProvider → data platform adapter           │
+│       ├── StepContext → flows data between steps            │
 │       │                                                     │
 │       └── IActionLog → execution logging                    │
 └─────────────────────────────────────────────────────────────┘
@@ -33,38 +36,43 @@ changes on a record. No Dapr dependency — this stage is pure .NET.
 
 1. XRM saves a record and detects a field change
 2. XRM's `OnUpdatedAsync` lifecycle hook fires
-3. Host's handler extracts old/new values and builds a `TransitionContext`
+3. Host's handler builds a `TransitionContext` with old/new values
 4. Host calls `TransitionActionDispatcher.DispatchAsync(context)`
-5. Dispatcher queries `ITransitionActionStore` for matching definitions
+5. Dispatcher queries `XrmTransitionActionStore` (reads ProcessDefinition records)
 6. For each match: executes steps in order via `IActivity` implementations
-7. Results are logged via `IActionLog`
-8. If a blocking action fails, dispatch stops
+7. `StepContext` passes output between steps (e.g., created record ID)
+8. Results are logged via `IActionLog`
+
+## Process definitions as XRM entities
+
+BPM ships a `BpmEntitySeeder` that creates a "ProcessDefinition" entity with:
+- Name, Description, EntityName, FieldName, FromValue, ToValue
+- StepsJson (JSON array of activity steps)
+- Enabled, Blocking (booleans)
+
+Users manage flow definitions the same way they manage any XRM entity:
+via the Blazor UI, the REST API, or data seeding.
+
+## Step context
+
+Activities can output values for subsequent steps:
+- `CreateRecordActivity` sets `StepContext.LastCreatedRecordId`
+- `LinkRecordActivity` can reference it via `{{StepContext.LastCreatedRecordId}}`
+
+Template syntax: `{{StepContext.Key}}` alongside existing `{{RecordId}}`, etc.
 
 ## Host responsibilities
 
-The host must provide implementations for:
+The host must provide:
 
 | Interface | Purpose |
 |-----------|---------|
-| `ITransitionActionStore` | Where process definitions live (DB, JSON file, in-memory) |
-| `IRecordProvider` | How to create/update records in the data platform |
 | `IActionLog` | Where to log execution results |
 | `IRecordLifecycleHandler` | XRM hook that triggers BPM dispatch |
 
-## Execution modes
-
-- **Fire-and-forget** (default): action failures are logged as warnings; the
-  original save succeeds.
-- **Blocking**: action must succeed or the dispatcher returns a failure result.
-  The host's lifecycle handler can throw to abort the save.
-
-## Template resolution
-
-Activity configs support `{{placeholder}}` syntax:
-- `{{EntityName}}`, `{{RecordId}}`, `{{FieldName}}`
-- `{{OldValue}}`, `{{NewValue}}`
+BPM provides everything else (store, activities, dispatcher, seeder).
 
 ## Testing
 
-All interfaces have in-memory test doubles in `Bpm.Tests/TestDoubles.cs`.
-No external dependencies required.
+`ITransitionActionStore` interface remains for unit testing with `InMemoryActionStore`.
+Activities are tested with fake implementations that don't need XRM running.

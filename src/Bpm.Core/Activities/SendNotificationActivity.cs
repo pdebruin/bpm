@@ -20,11 +20,12 @@ public class SendNotificationActivity : IActivity
     public Task<ActionOutcome> ExecuteAsync(
         Dictionary<string, string> config,
         TransitionContext context,
+        StepContext stepContext,
         CancellationToken ct = default)
     {
-        var to = ResolveTemplate(config.GetValueOrDefault("to", ""), context);
+        var to = Resolve(config.GetValueOrDefault("to", ""), context, stepContext);
         var template = config.GetValueOrDefault("template", "default");
-        var subject = ResolveTemplate(config.GetValueOrDefault("subject", ""), context);
+        var subject = Resolve(config.GetValueOrDefault("subject", ""), context, stepContext);
 
         _logger.LogInformation(
             "Notification sent: to={To}, template={Template}, subject={Subject}, entity={Entity}, record={RecordId}",
@@ -33,13 +34,14 @@ public class SendNotificationActivity : IActivity
         return Task.FromResult(ActionOutcome.Success);
     }
 
-    private static string ResolveTemplate(string template, TransitionContext context)
+    private static string Resolve(string template, TransitionContext context, StepContext stepContext)
     {
-        return template
+        template = template
             .Replace("{{EntityName}}", context.EntityName)
             .Replace("{{RecordId}}", context.RecordId.ToString())
             .Replace("{{FieldName}}", context.FieldName)
             .Replace("{{OldValue}}", context.OldValue ?? "")
             .Replace("{{NewValue}}", context.NewValue ?? "");
+        return stepContext.Resolve(template);
     }
 }

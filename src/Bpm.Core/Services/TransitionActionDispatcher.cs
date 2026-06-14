@@ -77,6 +77,8 @@ public class TransitionActionDispatcher
             DefinitionName = definition.Name
         };
 
+        var stepContext = new StepContext();
+
         foreach (var step in definition.Steps)
         {
             var activity = _activities.FirstOrDefault(a => a.TypeName == step.ActivityType);
@@ -94,7 +96,7 @@ public class TransitionActionDispatcher
             var sw = Stopwatch.StartNew();
             try
             {
-                var outcome = await activity.ExecuteAsync(step.Config, context, ct);
+                var outcome = await activity.ExecuteAsync(step.Config, context, stepContext, ct);
                 sw.Stop();
                 result.StepResults.Add(new ActionStepResult
                 {

@@ -38,22 +38,22 @@ public class InMemoryActionLog : IActionLog
 }
 
 /// <summary>
-/// In-memory record provider for testing.
+/// Fake activity for testing that always succeeds and records calls.
 /// </summary>
-public class InMemoryRecordProvider : IRecordProvider
+public class FakeActivity : IActivity
 {
-    public List<(string Entity, Dictionary<string, string> Fields)> CreatedRecords { get; } = new();
-    public List<(string Entity, Guid RecordId, string Field, string Value)> UpdatedFields { get; } = new();
+    public string TypeName { get; }
+    public List<(Dictionary<string, string> Config, TransitionContext Context)> Calls { get; } = new();
 
-    public Task CreateRecordAsync(string entityName, Dictionary<string, string> fields, CancellationToken ct = default)
-    {
-        CreatedRecords.Add((entityName, fields));
-        return Task.CompletedTask;
-    }
+    public FakeActivity(string typeName) => TypeName = typeName;
 
-    public Task UpdateFieldAsync(string entityName, Guid recordId, string fieldName, string value, CancellationToken ct = default)
+    public Task<ActionOutcome> ExecuteAsync(
+        Dictionary<string, string> config,
+        TransitionContext context,
+        StepContext stepContext,
+        CancellationToken ct = default)
     {
-        UpdatedFields.Add((entityName, recordId, fieldName, value));
-        return Task.CompletedTask;
+        Calls.Add((config, context));
+        return Task.FromResult(ActionOutcome.Success);
     }
 }
